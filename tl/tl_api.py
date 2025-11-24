@@ -1,7 +1,6 @@
 """
-统一的 Gemini API 客户端
-支持 Google 官方 API 和 OpenRouter API
-遵循官方 API 规范，支持任意模型名称和自定义 API base（反代）
+API客户端模块 y
+提供Google Gemini和OpenAI兼容API的客户端实现
 """
 
 from __future__ import annotations
@@ -17,7 +16,18 @@ import aiohttp
 
 from astrbot.api import logger
 
-from . import image_manager
+# 导入本地模块
+try:
+    from .tl_utils import save_base64_image, save_image_data
+except ImportError:
+    # 如果tl_utils不存在，先创建简单的占位符
+    async def save_base64_image(base64_data: str, image_format: str = "png") -> str | None:
+        """占位符函数"""
+        return None
+
+    async def save_image_data(image_data: bytes, image_format: str = "png") -> str | None:
+        """占位符函数"""
+        return None
 
 
 @dataclass
@@ -467,9 +477,7 @@ class GeminiAPIClient:
                     logger.debug("💾 开始保存图像文件...")
                     save_start = asyncio.get_event_loop().time()
 
-                    image_path = await image_manager.save_base64_image(
-                        base64_data, image_format
-                    )
+                    image_path = await save_base64_image(base64_data, image_format)
 
                     save_end = asyncio.get_event_loop().time()
                     logger.debug(
@@ -543,30 +551,14 @@ class GeminiAPIClient:
                     if "image_url" in image_item:
                         image_url = image_item["image_url"]
                         if image_url.startswith("data:image/"):
-                            image_url, image_path = await self._parse_data_uri(
-                                image_url
-                            )
+                            image_url, image_path = await self._parse_data_uri(image_url)
                         else:
-                            image_url, image_path = await self._download_image(
-                                image_url, session
-                            )
-                        return (
-                            image_url,
-                            image_path,
-                            None,
-                            text_content,
-                            text_content,
-                            None,
-                            None,
-                            None,
-                            text_content,
-                        )
+                            image_url, image_path = await self._download_image(image_url, session)
+                        return image_url, image_path, text_content
 
             # content 中查找图像
             if isinstance(content, str):
-                extracted_url, extracted_path = await self._extract_from_content(
-                    content
-                )
+                extracted_url, extracted_path = await self._extract_from_content(content)
                 if extracted_url or extracted_path:
                     return extracted_url, extracted_path, text_content
 
@@ -574,14 +566,10 @@ class GeminiAPIClient:
         elif "data" in response_data and response_data["data"]:
             for image_item in response_data["data"]:
                 if "url" in image_item:
-                    image_url, image_path = await self._download_image(
-                        image_item["url"], session
-                    )
+                    image_url, image_path = await self._download_image(image_item["url"], session)
                     return image_url, image_path, text_content
                 elif "b64_json" in image_item:
-                    image_path = await image_manager.save_base64_image(
-                        image_item["b64_json"], "png"
-                    )
+                    image_path = await save_base64_image(image_item["b64_json"], "png")
                     if image_path:
                         image_url = f"file://{Path(image_path).absolute()}"
                         return image_url, image_path, text_content
@@ -593,9 +581,7 @@ class GeminiAPIClient:
         logger.warning("OpenRouter 响应格式不支持或未找到图像数据")
         return None, None, None
 
-    async def _parse_data_uri(
-        self, data_uri: str
-    ) -> tuple[str | None, str | None, str | None]:
+    async def _parse_data_uri(self, data_uri: str) -> tuple[str | None, str | None]:
         """解析 data URI 格式的图像"""
         try:
             if ";base64," not in data_uri:
@@ -606,36 +592,32 @@ class GeminiAPIClient:
             mime_type = header.replace("data:", "")
             format_type = mime_type.split("/")[1] if "/" in mime_type else "png"
 
-            image_path = await image_manager.save_base64_image(base64_data, format_type)
+            image_path = await save_base64_image(base64_data, format_type)
             if image_path:
                 image_url = f"file://{Path(image_path).absolute()}"
-                return image_url, image_path, None
+                return image_url, image_path
         except Exception as e:
             logger.error(f"解析 data URI 失败: {e}")
 
         return None, None
 
-    async def _extract_from_content(
-        self, content: str
-    ) -> tuple[str | None, str | None, str | None]:
+    async def _extract_from_content(self, content: str) -> tuple[str | None, str | None]:
         """从文本内容中提取图像"""
         pattern = r"data:image/([^;]+);base64,([A-Za-z0-9+/=\s]+)"
         matches = re.findall(pattern, content)
 
         if matches:
             image_format, base64_string = matches[0]
-            image_path = await image_manager.save_base64_image(
-                base64_string, image_format
-            )
+            image_path = await save_base64_image(base64_string, image_format)
             if image_path:
                 image_url = f"file://{Path(image_path).absolute()}"
-                return image_url, image_path, None
+                return image_url, image_path
 
-        return None, None, None
+        return None, None
 
     async def _download_image(
         self, image_url: str, session: aiohttp.ClientSession
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None]:
         """下载并保存图像"""
         try:
             logger.debug(f"正在下载图像: {image_url[:100]}...")
@@ -655,17 +637,18 @@ class GeminiAPIClient:
                 else:
                     image_format = "png"
 
-                image_path = await image_manager.save_image_data(
-                    image_data, image_format
-                )
+                image_path = await save_image_data(image_data, image_format)
                 if image_path:
                     image_url_local = f"file://{Path(image_path).absolute()}"
-                    return image_url_local, image_path, None
+                    return image_url_local, image_path
         except Exception as e:
             logger.error(f"下载图像失败: {e}")
 
         return None, None
 
+
+# 为了兼容性，创建APIClient别名
+APIClient = GeminiAPIClient
 
 # 全局 API 客户端实例
 _api_client: GeminiAPIClient | None = None
