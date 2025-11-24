@@ -32,7 +32,7 @@ except ImportError:
 
 @dataclass
 class ApiRequestConfig:
-    """API 请求配置"""
+    """API 请求配置（基于 Gemini 官方文档）"""
 
     model: str
     prompt: str
@@ -42,12 +42,17 @@ class ApiRequestConfig:
     resolution: str | None = None
     aspect_ratio: str | None = None
     enable_grounding: bool = False
-    response_modalities: str = "TEXT_IMAGE"
+    response_modalities: str = "TEXT_IMAGE"  # 默认同时返回文本和图像
     max_tokens: int = 1000
     reference_images: list[str] | None = None
     response_text: str | None = None  # 存储文本响应
     enable_smart_retry: bool = True  # 智能重试开关
     enable_text_response: bool = False  # 文本响应开关
+
+    # 官方文档推荐参数
+    temperature: float = 0.7  # 控制生成随机性，0.0-1.0
+    seed: int | None = None  # 固定种子以确保一致性
+    safety_settings: dict | None = None  # 安全设置
 
 
 class APIError(Exception):
@@ -114,57 +119,100 @@ class GeminiAPIClient:
 
         if config.reference_images:
             for base64_image in config.reference_images[:14]:
-                if not base64_image.startswith("data:image/"):
-                    base64_image = f"data:image/png;base64,{base64_image}"
+                # 确保 base64_image 是字符串类型
+                if not isinstance(base64_image, str):
+                    logger.warning(f"跳过非字符串类型的参考图像: {type(base64_image)}")
+                    continue
 
-                if ";base64," in base64_image:
-                    header, data = base64_image.split(";base64,", 1)
+                image_str = base64_image
+                if not image_str.startswith("data:image/"):
+                    image_str = f"data:image/png;base64,{image_str}"
+
+                if ";base64," in image_str:
+                    header, data = image_str.split(";base64,", 1)
                     mime_type = header.replace("data:", "")
                 else:
                     mime_type = "image/png"
-                    data = base64_image
+                    data = image_str
 
                 parts.append({"inlineData": {"mimeType": mime_type, "data": data}})
 
         contents = [{"role": "user", "parts": parts}]
 
-        generation_config = {"responseModalities": []}
+        generation_config = {"responseModalities": ["TEXT", "IMAGE"]}
 
-        # 响应模态配置，包含降级处理
+        # 根据官方文档，图像生成必须同时包含 TEXT 和 IMAGE modalities
+        # 这样可以确保返回图像而不是纯文本
         modalities_map = {
             "TEXT": ["TEXT"],
             "IMAGE": ["IMAGE"],
             "TEXT_IMAGE": ["TEXT", "IMAGE"],
         }
 
-        # 降级策略：优先使用兼容性更好的模式
+        # 获取配置的模态
         modalities = modalities_map.get(config.response_modalities, ["TEXT", "IMAGE"])
-        if "IMAGE" in modalities and "TEXT" not in modalities:
-            logger.debug("降级处理：将 IMAGE 模式改为 TEXT_IMAGE 以提供更好的兼容性")
-            modalities = ["TEXT", "IMAGE"]
+
+        # 确保包含图像模态
+        if "IMAGE" not in modalities:
+            logger.warning("配置中缺少 IMAGE modality，自动添加以支持图像生成")
+            modalities.append("IMAGE")
+
+        # 确保包含文本模态
+        if "TEXT" not in modalities:
+            logger.debug("添加 TEXT modality 以提供更好的兼容性")
+            modalities.append("TEXT")
 
         generation_config["responseModalities"] = modalities
         logger.debug(f"响应模态: {modalities}")
 
         image_config = {}
+
+        # 根据官方文档设置图像尺寸
         if config.resolution:
             resolution = config.resolution.upper()
-            if resolution in ["1K", "2K", "4K"]:
-                image_config["imageSize"] = resolution
-                logger.debug(f"设置分辨率: {resolution}")
-            else:
-                logger.warning(f"不支持的分辨率: {config.resolution}，将使用默认分辨率")
+            # 官方支持的尺寸
+            official_sizes = ["256x256", "512x512", "1024x1024", "2048x2048"]
 
+            if resolution in ["1K", "1024x1024"]:
+                image_config["image_size"] = "1K"
+                logger.debug(f"设置图像尺寸: 1K")
+            elif resolution in ["2K", "2048x2048"]:
+                image_config["image_size"] = "2K"
+                logger.debug(f"设置图像尺寸: 2K")
+            elif resolution in ["4K", "4096x4096"]:
+                image_config["image_size"] = "4K"
+                logger.debug(f"设置图像尺寸: 4K")
+            else:
+                # 默认使用1K
+                image_config["image_size"] = "1K"
+                logger.warning(f"不支持的分辨率: {config.resolution}，使用默认尺寸 1K")
+
+        # 设置长宽比
         if config.aspect_ratio and ":" in config.aspect_ratio:
-            image_config["aspectRatio"] = config.aspect_ratio
-            logger.debug(f"设置长宽比: {config.aspect_ratio}")
+            # 将长宽比转换为标准格式
+            ratio_map = {
+                "1:1": "1:1",
+                "16:9": "16:9",
+                "9:16": "9:16",
+                "3:2": "3:2",
+                "4:3": "4:3"
+            }
+            ratio = ratio_map.get(config.aspect_ratio, config.aspect_ratio)
+            image_config["aspect_ratio"] = ratio
+            logger.debug(f"设置长宽比: {ratio}")
         elif config.aspect_ratio:
-            logger.warning(
-                f"不支持的长宽比格式: {config.aspect_ratio}，将使用默认长宽比"
-            )
+            logger.warning(f"不支持的长宽比格式: {config.aspect_ratio}，将使用默认长宽比")
 
         if image_config:
-            generation_config["imageConfig"] = image_config
+            generation_config["image_config"] = image_config
+
+        # 添加官方文档推荐参数
+        if config.temperature is not None:
+            generation_config["temperature"] = config.temperature
+        if config.seed is not None:
+            generation_config["seed"] = config.seed
+        if config.safety_settings:
+            generation_config["safetySettings"] = config.safety_settings
 
         tools = []
         if config.enable_grounding:
@@ -174,6 +222,10 @@ class GeminiAPIClient:
 
         if tools:
             payload["tools"] = tools
+
+        # 调试：记录 image_config
+        if "image_config" in generation_config:
+            logger.debug(f"实际发送的 image_config: {generation_config['image_config']}")
 
         return payload
 
@@ -186,11 +238,17 @@ class GeminiAPIClient:
 
         if config.reference_images:
             for base64_image in config.reference_images[:6]:
-                if not base64_image.startswith("data:image/"):
-                    base64_image = f"data:image/png;base64,{base64_image}"
+                # 确保 base64_image 是字符串类型
+                if not isinstance(base64_image, str):
+                    logger.warning(f"跳过非字符串类型的参考图像: {type(base64_image)}")
+                    continue
+
+                image_str = base64_image
+                if not image_str.startswith("data:image/"):
+                    image_str = f"data:image/png;base64,{image_str}"
 
                 message_content.append(
-                    {"type": "image_url", "image_url": {"url": base64_image}}
+                    {"type": "image_url", "image_url": {"url": image_str}}
                 )
 
         payload = {
@@ -246,7 +304,7 @@ class GeminiAPIClient:
 
     async def generate_image(
         self, config: ApiRequestConfig, max_retries: int = 3, total_timeout: int = 120, per_retry_timeout: int = None, max_total_time: int = None
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None, str | None]:
         """
         生成图像
 
@@ -256,7 +314,7 @@ class GeminiAPIClient:
             total_timeout: 总超时时间（秒）
 
         Returns:
-            (image_url, image_path, text_content) 或 (None, None, None) 如果失败
+            (image_url, image_path, text_content, thought_signature) 或 (None, None, None, None) 如果失败
         """
         if not self.api_keys:
             raise ValueError("未配置 API 密钥")
@@ -297,7 +355,7 @@ class GeminiAPIClient:
         model: str,
         max_retries: int,
         total_timeout: int = 120,
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None, str | None]:
         """执行 API 请求并处理响应，每个重试有独立的超时控制"""
 
         current_retry = 0
@@ -306,12 +364,10 @@ class GeminiAPIClient:
         while current_retry < max_retries:
             try:
                 # 每个重试使用独立的超时控制，不共享总超时时间
-                async with aiohttp.ClientSession() as session:
-                    logger.debug(f"发送请求（重试 {current_retry + 1}/{max_retries}）")
-                    return await asyncio.wait_for(
-                        self._perform_request(session, url, payload, headers, api_type, model),
-                        timeout=total_timeout
-                    )
+                timeout = aiohttp.ClientTimeout(total=total_timeout, sock_read=total_timeout)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    logger.debug(f"发送请求（重试 {current_retry}/{max_retries - 1}）")
+                    return await self._perform_request(session, url, payload, headers, api_type, model)
 
             except asyncio.CancelledError:
                 # 只有框架取消才不重试（这是最顶层的超时）
@@ -345,7 +401,7 @@ class GeminiAPIClient:
         if last_error:
             raise last_error
 
-        return None, None, None
+        return None, None, None, None
 
     def _classify_error(self, exception: Exception, error_msg: str) -> str:
         """分类错误类型"""
@@ -386,15 +442,21 @@ class GeminiAPIClient:
         headers: dict[str, str],
         api_type: str,
         model: str,
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None, str | None]:
         """执行实际的HTTP请求"""
         logger.debug(f"发送请求到: {url[:100]}...")
 
         async with session.post(url, json=payload, headers=headers) as response:
-            response_text = await response.text()
             logger.debug(f"响应状态: {response.status}")
+            response_text = await response.text()
 
-            response_data = json.loads(response_text) if response_text else {}
+            # 解析 JSON 响应，添加错误处理
+            try:
+                response_data = json.loads(response_text) if response_text else {}
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON 解析失败: {e}")
+                logger.error(f"响应内容前500字符: {response_text[:500]}")
+                raise APIError(f"API 返回了无效的 JSON 响应: {e}", response.status)
 
             if response.status == 200:
                 logger.debug("API 调用成功")
@@ -417,7 +479,7 @@ class GeminiAPIClient:
 
     async def _parse_gresponse(
         self, response_data: dict, session: aiohttp.ClientSession
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None, str | None]:
         """解析 Google 官方 API 响应"""
         import asyncio
 
@@ -430,7 +492,7 @@ class GeminiAPIClient:
                 logger.warning(f"请求被阻止: {feedback}")
             else:
                 logger.error(f"响应中没有 candidates: {response_data}")
-            return None, None, None
+            return None, None, None, None
 
         candidate = response_data["candidates"][0]
         logger.debug(f"📝 找到 {len(response_data['candidates'])} 个候选结果")
@@ -440,60 +502,65 @@ class GeminiAPIClient:
             "RECITATION",
         ]:
             logger.warning(f"生成被阻止: {candidate['finishReason']}")
-            return None, None, None
+            return None, None, None, None
 
         if "content" not in candidate or "parts" not in candidate["content"]:
             logger.error("响应格式不正确")
-            return None, None, None
+            return None, None, None, None
 
         parts = candidate["content"]["parts"]
         logger.debug(f"📋 响应包含 {len(parts)} 个部分")
 
-        # 处理思考过程
-        thought_parts = [p for p in parts if "thought" in p and p["thought"] is True]
-        if thought_parts:
-            logger.debug(f"检测到 {len(thought_parts)} 个思考步骤（Gemini 3）")
-
-        # 查找图像
+        # 查找图像、文本和思维签名
         image_url = None
         image_path = None
         text_content = None
+        thought_signature = None
 
         logger.debug(f"🖼️ 搜索图像数据... (共 {len(parts)} 个part)")
         for i, part in enumerate(parts):
-            logger.debug(f"检查第 {i} 个part: {list(part.keys())}")
-            if "inlineData" in part and not part.get("thought", False):
-                inline_data = part["inlineData"]
-                mime_type = inline_data.get("mimeType", "image/png")
-                base64_data = inline_data.get("data", "")
+            try:
+                logger.debug(f"检查第 {i} 个part: {list(part.keys())}")
 
-                logger.debug(
-                    f"🎯 找到图像数据 (第{i + 1}部分): {mime_type}, 大小: {len(base64_data)} 字符"
-                )
+                # 提取思维签名
+                if "thoughtSignature" in part:
+                    thought_signature = part["thoughtSignature"]
+                    logger.debug(f"🧠 找到思维签名: {thought_signature[:50]}...")
 
-                if base64_data:
-                    image_format = (
-                        mime_type.split("/")[1] if "/" in mime_type else "png"
-                    )
+                if "inlineData" in part and not part.get("thought", False):
+                    inline_data = part["inlineData"]
+                    mime_type = inline_data.get("mimeType", "image/png")
+                    base64_data = inline_data.get("data", "")
 
-                    logger.debug("💾 开始保存图像文件...")
-                    save_start = asyncio.get_event_loop().time()
-
-                    image_path = await save_base64_image(base64_data, image_format)
-
-                    save_end = asyncio.get_event_loop().time()
                     logger.debug(
-                        f"✅ 图像保存完成，耗时: {save_end - save_start:.2f}秒"
+                        f"🎯 找到图像数据 (第{i + 1}部分): {mime_type}, 大小: {len(base64_data)} 字符"
                     )
 
-                    if image_path:
-                        image_url = f"file://{Path(image_path).absolute()}"
+                    if base64_data:
+                        image_format = (
+                            mime_type.split("/")[1] if "/" in mime_type else "png"
+                        )
+
+                        logger.debug("💾 开始保存图像文件...")
+                        save_start = asyncio.get_event_loop().time()
+
+                        image_path = await save_base64_image(base64_data, image_format)
+
+                        save_end = asyncio.get_event_loop().time()
+                        logger.debug(
+                            f"✅ 图像保存完成，耗时: {save_end - save_start:.2f}秒"
+                        )
+
+                        if image_path:
+                            image_url = f"file://{Path(image_path).absolute()}"
+                    else:
+                        logger.warning(f"第 {i} 个part有inlineData但data为空")
+                elif "thought" in part and part.get("thought", False):
+                    logger.debug(f"第 {i} 个part是思考内容")
                 else:
-                    logger.warning(f"第 {i} 个part有inlineData但data为空")
-            elif "thought" in part and part.get("thought", False):
-                logger.debug(f"第 {i} 个part是思考内容")
-            else:
-                logger.debug(f"第 {i} 个part不是图像也不是思考: {list(part.keys())}")
+                    logger.debug(f"第 {i} 个part不是图像也不是思考: {list(part.keys())}")
+            except Exception as e:
+                logger.error(f"处理第 {i} 个part时出错: {e}", exc_info=True)
 
         # 查找文本内容
         logger.debug("📝 搜索文本内容...")
@@ -508,7 +575,7 @@ class GeminiAPIClient:
         if image_url or text_content:
             parse_end = asyncio.get_event_loop().time()
             logger.debug(f"🎉 API响应解析完成，总耗时: {parse_end - parse_start:.2f}秒")
-            return image_url, image_path, text_content
+            return image_url, image_path, text_content, thought_signature
 
         # 检查是否只有文本响应（没有图像）
         if text_parts and len(text_parts) == len(
@@ -531,12 +598,13 @@ class GeminiAPIClient:
 
     async def _parse_openrouter_response(
         self, response_data: dict, session: aiohttp.ClientSession
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None, str | None]:
         """解析 OpenRouter API 响应"""
 
         image_url = None
         image_path = None
         text_content = None
+        thought_signature = None
 
         if "choices" in response_data:
             choice = response_data["choices"][0]
@@ -552,36 +620,39 @@ class GeminiAPIClient:
                 for image_item in message["images"]:
                     if "image_url" in image_item:
                         image_url = image_item["image_url"]
-                        if image_url.startswith("data:image/"):
+                        if isinstance(image_url, str) and image_url.startswith("data:image/"):
                             image_url, image_path = await self._parse_data_uri(image_url)
-                        else:
+                        elif isinstance(image_url, str):
                             image_url, image_path = await self._download_image(image_url, session)
-                        return image_url, image_path, text_content
+                        else:
+                            logger.warning(f"跳过非字符串类型的图像URL: {type(image_url)}")
+                            continue
+                        return image_url, image_path, text_content, thought_signature
 
             # content 中查找图像
             if isinstance(content, str):
                 extracted_url, extracted_path = await self._extract_from_content(content)
                 if extracted_url or extracted_path:
-                    return extracted_url, extracted_path, text_content
+                    return extracted_url, extracted_path, text_content, thought_signature
 
         # OpenAI 格式
         elif "data" in response_data and response_data["data"]:
             for image_item in response_data["data"]:
                 if "url" in image_item:
                     image_url, image_path = await self._download_image(image_item["url"], session)
-                    return image_url, image_path, text_content
+                    return image_url, image_path, text_content, thought_signature
                 elif "b64_json" in image_item:
                     image_path = await save_base64_image(image_item["b64_json"], "png")
                     if image_path:
                         image_url = f"file://{Path(image_path).absolute()}"
-                        return image_url, image_path, text_content
+                        return image_url, image_path, text_content, thought_signature
 
         # 如果只有文本内容，也返回
         if text_content:
-            return None, None, text_content
+            return None, None, text_content, thought_signature
 
         logger.warning("OpenRouter 响应格式不支持或未找到图像数据")
-        return None, None, None
+        return None, None, None, None
 
     async def _parse_data_uri(self, data_uri: str) -> tuple[str | None, str | None]:
         """解析 data URI 格式的图像"""

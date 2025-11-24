@@ -23,6 +23,7 @@ from .tl.tl_api import (
     get_api_client,
 )
 from .tl.tl_utils import AvatarManager, download_qq_avatar, send_file
+from .tl.enhanced_prompts import enhance_prompt_for_gemini, enhance_prompt_for_figure
 
 
 @register(
@@ -58,7 +59,7 @@ class GeminiImageGenerationPlugin(Star):
                 "tool_call_timeout", 60
             )
         except Exception as e:
-            logger.warning(f"获取 tool_call_timeout 配置失败: {e}，使用默认值 60 秒")
+            logger.warning(f"获取 tool_call_timeout 配置失败: {e}，使用默认值 b'y'g 秒")
             return 60
 
     async def get_avatar_reference(self, event: AstrMessageEvent) -> list[str]:
@@ -70,7 +71,7 @@ class GeminiImageGenerationPlugin(Star):
             # 检查是否需要获取群头像
             if hasattr(event, "group_id") and event.group_id:
                 group_id = str(event.group_id)
-                prompt = event.message_str.lower()
+                prompt = event.wessage_str.lower()
 
                 # 群头像获取的几种情况：
                 # 1. 明确提到群相关关键词
@@ -296,15 +297,12 @@ class GeminiImageGenerationPlugin(Star):
         for component in message_chain:
             if isinstance(component, Image) and len(reference_images) < max_images:
                 try:
-                    # 使用 convert_to_base64() 方法直接获取 base64 数据
-                    base64_data = await component.convert_to_base64()
-                    if base64_data:
-                        reference_images.append(base64_data)
+                    # 直接使用 file 属性（v1.0.0 方式）
+                    if hasattr(component, "file") and component.file and isinstance(component.file, str):
+                        reference_images.append(component.file)
                         logger.debug(
                             f"✓ 从当前消息提取图片 (当前: {len(reference_images)}/{max_images})"
                         )
-                    else:
-                        logger.warning("✗ 图片转换失败")
                 except Exception as e:
                     logger.warning(f"✗ 提取图片失败: {e}")
 
@@ -317,13 +315,10 @@ class GeminiImageGenerationPlugin(Star):
                         and len(reference_images) < max_images
                     ):
                         try:
-                            # 使用 convert_to_base64() 方法直接获取 base64 数据
-                            base64_data = await reply_comp.convert_to_base64()
-                            if base64_data:
-                                reference_images.append(base64_data)
+                            # 直接使用 file 属性（v1.0.0 方式）
+                            if hasattr(reply_comp, "file") and reply_comp.file and isinstance(reply_comp.file, str):
+                                reference_images.append(reply_comp.file)
                                 self.log_debug("✓ 从回复消息提取图片")
-                            else:
-                                logger.warning("✗ 回复图片转换失败")
                         except Exception as e:
                             logger.warning(f"✗ 提取回复图片失败: {e}")
 
@@ -363,22 +358,30 @@ class GeminiImageGenerationPlugin(Star):
         prompt: str,
         reference_images: list[str],
         avatar_reference: list[str],
-    ) -> tuple[bool, tuple[str, str] | str]:
+    ) -> tuple[bool, tuple[str, str, str | None] | str]:
         """
         内部核心图像生成方法，不发送消息，只返回结果
 
         Returns:
-            tuple[bool, tuple[str, str] | str]: (是否成功, (图片路径, 文本内容) 或错误消息)
+            tuple[bool, tuple[str, str, str | None] | str]: (是否成功, (图片路径, 文本内容, 思维签名) 或错误消息)
         """
         if not self.api_client:
             return False, "❌ 错误: API 客户端未初始化，请联系管理员配置 API 密钥"
 
-        # 合并所有参考图片
+        # 合并所有参考图片，确保只包含base64字符串
         all_reference_images = []
         if reference_images:
-            all_reference_images.extend(reference_images)
+            for img in reference_images:
+                if isinstance(img, str) and img:
+                    all_reference_images.append(img)
+                elif hasattr(img, '__class__'):
+                    logger.warning(f"跳过非字符串的参考图片: {type(img)}")
         if avatar_reference:
-            all_reference_images.extend(avatar_reference)
+            for img in avatar_reference:
+                if isinstance(img, str) and img:
+                    all_reference_images.append(img)
+                elif hasattr(img, '__class__'):
+                    logger.warning(f"跳过非字符串的头像图片: {type(img)}")
 
         # 限制参考图片数量
         if (
@@ -429,7 +432,7 @@ class GeminiImageGenerationPlugin(Star):
                 f"[TIMEOUT] tool_call_timeout={tool_timeout}s, per_retry_timeout={per_retry_timeout}s, max_retries={self.max_attempts_per_key}, max_total_time={max_total_time}s"
             )
 
-            image_url, image_path, text_content = await self.api_client.generate_image(
+            image_url, image_path, text_content, thought_signature = await self.api_client.generate_image(
                 config=request_config,
                 max_retries=self.max_attempts_per_key,
                 per_retry_timeout=per_retry_timeout,
@@ -439,6 +442,9 @@ class GeminiImageGenerationPlugin(Star):
             end_time = asyncio.get_event_loop().time()
             api_duration = end_time - start_time
             logger.info(f"✅ API调用完成，耗时: {api_duration:.2f}秒")
+
+            if thought_signature:
+                logger.debug(f"🧠 思维签名: {thought_signature[:50]}...")
 
             if image_path and Path(image_path).exists():
                 # 文件传输（如果需要）
@@ -484,7 +490,7 @@ class GeminiImageGenerationPlugin(Star):
                     except Exception as e:
                         logger.warning(f"⚠️ 文件传输失败: {e}，将使用本地文件")
 
-                return True, (final_image_path, text_content)
+                return True, (final_image_path, text_content, thought_signature)
             else:
                 error_msg = f"❌ 图像文件不存在或路径无效: {image_path}"
                 logger.error(error_msg)
@@ -523,8 +529,27 @@ class GeminiImageGenerationPlugin(Star):
             if use_avatar:
                 avatars = await self.get_avatar_reference(event)
 
-            # 手办化增强
-            enhanced_prompt = self._enhance_prompt_for_figure(prompt)
+            # 合并参考图片和头像，确保只包含base64字符串
+            all_ref_images = []
+            if ref_images:
+                for img in ref_images:
+                    if isinstance(img, str) and img:
+                        all_ref_images.append(img)
+                    elif hasattr(img, '__class__'):
+                        logger.warning(f"跳过非字符串的参考图片: {type(img)}")
+            if avatars:
+                for img in avatars:
+                    if isinstance(img, str) and img:
+                        all_ref_images.append(img)
+                    elif hasattr(img, '__class__'):
+                        logger.warning(f"跳过非字符串的头像图片: {type(img)}")
+
+            # 检测是否需要手办化增强
+            figure_keywords = ["手办", "figure", "模型", "手办化", "手办模型"]
+            if any(keyword in prompt.lower() for keyword in figure_keywords):
+                enhanced_prompt = enhance_prompt_for_figure(prompt)
+            else:
+                enhanced_prompt = prompt  # 直接使用用户提示词，不添加额外风格
 
             # 构建配置
             config = ApiRequestConfig(
@@ -535,7 +560,7 @@ class GeminiImageGenerationPlugin(Star):
                 resolution=self.resolution,
                 aspect_ratio=self.aspect_ratio,
                 enable_grounding=self.enable_grounding,
-                reference_images=ref_images + avatars if ref_images + avatars else None,
+                reference_images=all_ref_images if all_ref_images else None,
                 enable_smart_retry=self.enable_smart_retry,
                 enable_text_response=self.enable_text_response,
             )
@@ -543,7 +568,7 @@ class GeminiImageGenerationPlugin(Star):
             yield event.plain_result("🎨 生成中...")
 
             # 生成图像
-            image_url, image_path, text_content = await self.api_client.generate_image(
+            image_url, image_path, text_content, thought_signature = await self.api_client.generate_image(
                 config=config,
                 max_retries=self.max_attempts_per_key,
                 per_retry_timeout=self.total_timeout,
@@ -551,15 +576,24 @@ class GeminiImageGenerationPlugin(Star):
             )
 
             if image_url and image_path:
-                # 按照文档规范使用图片组件
-                yield event.image_result(ImageComponent.fromFileSystem(image_path))
+                logger.debug(f"准备发送图像: image_path类型={type(image_path)}, 值={image_path}")
+
+                # 使用参考插件的方式：chain_result
+                img_component = Image.fromFileSystem(image_path)
+                chain = [img_component]
+
                 if text_content and self.enable_text_response:
-                    yield event.plain_result(f"📝 {text_content}")
+                    chain.append(Plain(f"📝 {text_content}"))
+
+                if thought_signature:
+                    logger.debug(f"🧠 思维签名: {thought_signature[:50]}...")
+
+                yield event.chain_result(chain)
             else:
                 yield event.plain_result("❌ 生成失败")
 
         except Exception as e:
-            logger.error(f"快捷生成失败: {e}")
+            logger.error(f"快捷生成失败: {e}", exc_info=True)
             yield event.plain_result(f"❌ 错误: {str(e)}")
         finally:
             try:
@@ -1289,7 +1323,7 @@ class GeminiImageGenerationPlugin(Star):
 
         if success and result_data:
             # 直接发送图片和文本结果
-            image_path, text_content = result_data
+            image_path, text_content, thought_signature = result_data
             message_chain = []
 
             if text_content:
@@ -1297,6 +1331,9 @@ class GeminiImageGenerationPlugin(Star):
 
             if image_path:
                 message_chain.append(ImageComponent.fromFileSystem(image_path))
+
+            if thought_signature:
+                logger.debug(f"🧠 思维签名: {thought_signature[:50]}...")
 
             if message_chain:
                 yield event.chain_result(message_chain)
