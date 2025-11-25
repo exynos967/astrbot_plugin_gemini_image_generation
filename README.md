@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/Version-v1.1.0-blue)
+![Version](https://img.shields.io/badge/Version-v1.2.0-blue)
 ![License](https://img.shields.io/badge/License-MIT-orange)
 
 **🎨 强大的 Gemini 图像生成插件，支持智能头像参考和多模式生成**
