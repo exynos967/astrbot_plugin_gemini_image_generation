@@ -304,6 +304,9 @@ class GeminiImageGenerationPlugin(Star):
         # 统一从 AstrBot 提供商读取密钥/端点/模型
         self.api_keys: list[str] = []
 
+        # 尝试从 AstrBot 提供商读取动态配置（可能在启动初期尚未就绪）
+        self._load_provider_from_context()
+
         image_settings = self.config.get("image_generation_settings", {})
         self.resolution = image_settings.get("resolution", "1K")
         self.aspect_ratio = image_settings.get("aspect_ratio", "1:1")
@@ -348,7 +351,9 @@ class GeminiImageGenerationPlugin(Star):
                 if 1 <= quality_int <= 100:
                     self.html_render_options["quality"] = quality_int
                 else:
-                    logger.warning("html_render_options.quality 超出范围(1-100)，已忽略")
+                    logger.warning(
+                        "html_render_options.quality 超出范围(1-100)，已忽略"
+                    )
                     self.html_render_options.pop("quality", None)
         except Exception:
             logger.warning("解析 html_render_options 失败，已忽略质量设置")
@@ -386,69 +391,6 @@ class GeminiImageGenerationPlugin(Star):
         # 内部限流状态：按群维度统计请求时间戳
         self._rate_limit_buckets: dict[str, list[float]] = {}
         self._rate_limit_lock = asyncio.Lock()
-
-        # 从 AstrBot 提供商管理器读取模型/密钥/端点
-        try:
-            provider_mgr = getattr(self.context, "provider_manager", None)
-            provider = None
-            if provider_mgr:
-                if provider_id and hasattr(provider_mgr, "inst_map"):
-                    provider = provider_mgr.inst_map.get(provider_id)
-                if not provider:
-                    provider = provider_mgr.get_using_provider(
-                        ProviderType.CHAT_COMPLETION, None
-                    )
-
-            if provider:
-                # 补全 provider_id，便于后续视觉识别调用
-                if not self.provider_id:
-                    self.provider_id = provider.provider_config.get("id", "")
-                prov_type = str(provider.provider_config.get("type", "")).lower()
-                # 如果用户未显式选择 api_type，则按提供商类型推断
-                if not manual_api_type:
-                    if "googlegenai" in prov_type or "gemini" in prov_type:
-                        self.api_type = "google"
-                    elif "openai" in prov_type:
-                        self.api_type = "openai"
-                    else:
-                        logger.warning(
-                            f"提供商 {provider.provider_config.get('id')} 类型 {prov_type} 非Gemini/OpenAI，可能无法生成图像"
-                        )
-
-                prov_model = (
-                    provider.get_model()
-                    or provider.provider_config.get("model_config", {}).get("model")
-                )
-                # 若用户未手填模型，则使用提供商模型
-                if prov_model and not manual_model:
-                    self.model = prov_model
-
-                prov_keys = provider.get_keys() or []
-                self.api_keys = [str(k).strip() for k in prov_keys if str(k).strip()]
-
-                prov_base = provider.provider_config.get("api_base")
-                # 若用户未手填自定义 base，则使用提供商 base
-                if prov_base and not manual_api_base:
-                    self.api_base = prov_base
-
-                logger.info(
-                    f"✓ 已从 AstrBot 提供商读取配置，类型={self.api_type} 模型={self.model} 密钥={len(self.api_keys)}"
-                )
-            else:
-                logger.error("未找到可用的 AstrBot 提供商，无法读取模型/密钥，请在主配置中选择提供商")
-        except Exception as e:
-            logger.error(f"读取 AstrBot 提供商配置失败: {e}")
-
-        if self.api_keys:
-            self.api_client = get_api_client(self.api_keys)
-            logger.info("✓ API 客户端已初始化")
-            logger.info(f"  - 类型: {self.api_type}")
-            logger.info(f"  - 模型: {self.model}")
-            logger.info(f"  - 密钥数量: {len(self.api_keys)}")
-            if self.api_base:
-                logger.info(f"  - 自定义 API Base: {self.api_base}")
-        else:
-            logger.error("✗ 未读取到 API 密钥，请确认 AstrBot 提供商中已配置 key")
 
     async def _llm_detect_and_split(self, image_path: str) -> list[str]:
         """使用视觉 LLM 识别裁剪框后切割，失败返回空列表"""
@@ -650,7 +592,9 @@ class GeminiImageGenerationPlugin(Star):
 
             cleaned = img.strip()
             if force_b64 and cleaned.lower().startswith("data:"):
-                self.log_debug(f"跳过 data URL（force_base64 模式）({source}): {cleaned[:64]}...")
+                self.log_debug(
+                    f"跳过 data URL（force_base64 模式）({source}): {cleaned[:64]}..."
+                )
                 continue
 
             if self._is_valid_base64_image_str(cleaned):
@@ -660,9 +604,7 @@ class GeminiImageGenerationPlugin(Star):
             ):
                 valid.append(cleaned)
             else:
-                self.log_debug(
-                    f"跳过非支持格式参考图像({source}): {cleaned[:64]}..."
-                )
+                self.log_debug(f"跳过非支持格式参考图像({source}): {cleaned[:64]}...")
 
         return valid
 
@@ -728,10 +670,117 @@ class GeminiImageGenerationPlugin(Star):
 
     async def initialize(self):
         """插件初始化"""
+        # 启动阶段如果 provider_manager 还未就绪，这里再尝试读取一次
+        if not self.api_client:
+            self._load_provider_from_context()
+
         if self.api_client:
             logger.info("🎨 Gemini 图像生成插件已加载")
         else:
             logger.error("✗ API 客户端初始化失败，请检查配置")
+
+    @filter.on_astrbot_loaded()
+    async def on_astrbot_loaded(self):
+        """AstrBot 完成初始化后再次尝试加载提供商，解决启动顺序导致的配置未读问题"""
+        if not self.api_client:
+            self._load_provider_from_context()
+            if self.api_client:
+                logger.info("✓ AstrBot 加载完成后已成功初始化 API 客户端")
+            else:
+                logger.error(
+                    "✗ AstrBot 加载完成后仍未初始化 API 客户端，请检查提供商配置"
+                )
+
+    def _ensure_api_client(self) -> bool:
+        """确保 API 客户端已初始化，启动初期 provider_mgr 可能尚未就绪"""
+        if self.api_client:
+            return True
+        self._load_provider_from_context()
+        if not self.api_client:
+            logger.error("✗ API 客户端仍未初始化，请检查 AstrBot 提供商配置")
+            return False
+        return True
+
+    def _load_provider_from_context(self):
+        """从 AstrBot 提供商读取模型/密钥并初始化客户端，可多次调用用于补偿启动时机"""
+        api_settings = self.config.get("api_settings", {})
+        provider_id = api_settings.get("provider_id") or self.provider_id
+        manual_api_type = (api_settings.get("api_type") or "").strip()
+        manual_api_base = (api_settings.get("custom_api_base") or "").strip()
+        manual_model = (api_settings.get("model") or "").strip()
+        if manual_api_type and not self.api_type:
+            self.api_type = manual_api_type
+        if manual_api_base and not self.api_base:
+            self.api_base = manual_api_base
+        if manual_model and not self.model:
+            self.model = manual_model
+
+        try:
+            provider_mgr = getattr(self.context, "provider_manager", None)
+            provider = None
+            if provider_mgr:
+                if provider_id and hasattr(provider_mgr, "inst_map"):
+                    provider = provider_mgr.inst_map.get(provider_id)
+                if not provider:
+                    provider = provider_mgr.get_using_provider(
+                        ProviderType.CHAT_COMPLETION, None
+                    )
+
+            if provider:
+                # 补全 provider_id，便于后续视觉识别调用
+                if not self.provider_id:
+                    self.provider_id = provider.provider_config.get("id", "")
+                prov_type = str(provider.provider_config.get("type", "")).lower()
+                # 如果用户未显式选择 api_type，则按提供商类型推断
+                if not manual_api_type:
+                    if "googlegenai" in prov_type or "gemini" in prov_type:
+                        self.api_type = "google"
+                    elif "openai" in prov_type:
+                        self.api_type = "openai"
+                    else:
+                        logger.warning(
+                            f"提供商 {provider.provider_config.get('id')} 类型 {prov_type} 非Gemini/OpenAI，可能无法生成图像"
+                        )
+
+                prov_model = provider.get_model() or provider.provider_config.get(
+                    "model_config", {}
+                ).get("model")
+                # 若用户未手填模型，则使用提供商模型
+                if prov_model and not manual_model and not self.model:
+                    self.model = prov_model
+
+                prov_keys = provider.get_keys() or []
+                # 避免重复覆盖已有非空密钥
+                if not self.api_keys:
+                    self.api_keys = [
+                        str(k).strip() for k in prov_keys if str(k).strip()
+                    ]
+
+                prov_base = provider.provider_config.get("api_base")
+                # 若用户未手填自定义 base，则使用提供商 base
+                if prov_base and not manual_api_base and not self.api_base:
+                    self.api_base = prov_base
+
+                logger.info(
+                    f"✓ 已从 AstrBot 提供商读取配置，类型={self.api_type} 模型={self.model} 密钥={len(self.api_keys)}"
+                )
+            else:
+                logger.error(
+                    "未找到可用的 AstrBot 提供商，无法读取模型/密钥，请在主配置中选择提供商"
+                )
+        except Exception as e:
+            logger.error(f"读取 AstrBot 提供商配置失败: {e}")
+
+        if self.api_keys:
+            self.api_client = get_api_client(self.api_keys)
+            logger.info("✓ API 客户端已初始化")
+            logger.info(f"  - 类型: {self.api_type}")
+            logger.info(f"  - 模型: {self.model}")
+            logger.info(f"  - 密钥数量: {len(self.api_keys)}")
+            if self.api_base:
+                logger.info(f"  - 自定义 API Base: {self.api_base}")
+        else:
+            logger.error("✗ 未读取到 API 密钥，请确认 AstrBot 提供商中已配置 key")
 
     async def _download_qq_image(self, url: str) -> str | None:
         """对QQ图床做特殊处理，补充Referer/UA后转为base64"""
@@ -751,7 +800,9 @@ class GeminiImageGenerationPlugin(Star):
                 headers["Referer"] = "https://qun.qq.com"
 
             timeout = aiohttp.ClientTimeout(total=12, connect=5)
-            async with aiohttp.ClientSession(headers=headers, trust_env=True) as session:
+            async with aiohttp.ClientSession(
+                headers=headers, trust_env=True
+            ) as session:
                 async with session.get(url, timeout=timeout) as resp:
                     if resp.status != 200:
                         logger.warning(
@@ -872,8 +923,11 @@ class GeminiImageGenerationPlugin(Star):
                     if not self.api_client:
                         logger.warning("API 客户端未初始化，无法转换图片为base64")
                         return None
-                    mime_type, base64_data = await self.api_client._normalize_image_input(
-                        candidate
+                    (
+                        mime_type,
+                        base64_data,
+                    ) = await self.api_client._normalize_image_input(
+                        candidate, image_input_mode=image_mode
                     )
                     if base64_data:
                         data_url = (
@@ -1038,7 +1092,9 @@ class GeminiImageGenerationPlugin(Star):
                 f"📸 已收集图片: 消息 {len(message_images)} 张，头像 {len(avatar_images)} 张"
             )
         else:
-            logger.info("📸 未收集到有效参考图片，若需参考图可直接发送图片或检查网络权限")
+            logger.info(
+                "📸 未收集到有效参考图片，若需参考图可直接发送图片或检查网络权限"
+            )
 
         return message_images, avatar_images
 
@@ -1056,10 +1112,10 @@ class GeminiImageGenerationPlugin(Star):
             tuple[bool, tuple[list[str], list[str], str | None, str | None] | str]:
             (是否成功, (图片URL列表, 图片路径列表, 文本内容, 思维签名) 或错误消息)
         """
-        if not self.api_client:
+        if not self._ensure_api_client():
             return False, (
                 "❌ 无法生成图像：API 客户端尚未初始化。\n"
-                "🧐 可能原因：API 配置或密钥缺失、加载失败。\n"
+                "🧐 可能原因：服务启动过快，提供商尚未加载或 API 配置/密钥缺失。\n"
                 "✅ 建议：先在配置文件中填写有效的 API 密钥并重启服务。"
             )
 
@@ -1154,7 +1210,10 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                     continue
                 if Path(img_path).exists():
                     resolved_path = img_path
-                    if self.nap_server_address and self.nap_server_address != "localhost":
+                    if (
+                        self.nap_server_address
+                        and self.nap_server_address != "localhost"
+                    ):
                         logger.info(f"📤 开始传输第 {idx + 1} 张图片到远程服务器...")
                         try:
                             remote_path = await asyncio.wait_for(
@@ -1200,7 +1259,9 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
             return False, error_msg
 
         except APIError as e:
-            status_part = f"（状态码 {e.status_code}）" if e.status_code is not None else ""
+            status_part = (
+                f"（状态码 {e.status_code}）" if e.status_code is not None else ""
+            )
             error_msg = f"❌ 图像生成失败{status_part}：{e.message}"
             if e.status_code == 429:
                 error_msg += "\n🧐 可能原因：请求过于频繁或额度已用完。\n✅ 建议：稍等片刻再试，或在配置中增加可用额度/开启智能重试。"
@@ -1277,7 +1338,9 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
         from astrbot.api import message_components as Comp
 
         cleaned_text = self._clean_text_content(text_content) if text_content else ""
-        text_to_send = cleaned_text if (self.enable_text_response and cleaned_text) else ""
+        text_to_send = (
+            cleaned_text if (self.enable_text_response and cleaned_text) else ""
+        )
 
         available_images = self._merge_available_images(image_paths, image_urls)
         total_items = len(available_images) + (1 if text_to_send else 0)
@@ -1288,7 +1351,9 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
 
         if not available_images:
             if cleaned_text:
-                yield event.plain_result("⚠️ 当前模型只返回了文本，请检查模型配置或者重试")
+                yield event.plain_result(
+                    "⚠️ 当前模型只返回了文本，请检查模型配置或者重试"
+                )
                 if text_to_send:
                     yield event.plain_result(f"📝 {text_to_send}")
             else:
@@ -1382,8 +1447,12 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
         skip_figure_enhance: bool = False,
     ):
         """快捷图像生成"""
-        if not self.api_client:
-            yield event.plain_result("❌ API 客户端未初始化")
+        if not self._ensure_api_client():
+            yield event.plain_result(
+                "❌ API 客户端未初始化。\n"
+                "🧐 可能原因：服务启动过快，提供商尚未加载或密钥缺失。\n"
+                "✅ 建议：确认 AstrBot 主配置已选择提供商并填写密钥后重试。"
+            )
             return
 
         try:
@@ -1626,7 +1695,34 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
         ):
             yield result
 
+    @quick_mode_group.command("手办化")
+    async def quick_figure(self, event: AstrMessageEvent, prompt: str):
+        """手办化快速模式 - 树脂收藏级手办效果"""
+        # 参数解析：1/PVC -> 风格1；2/GK -> 风格2
+        style_type = 1
+        clean_prompt = prompt
 
+        if prompt:
+            p_lower = prompt.lower()
+            if p_lower.startswith("1") or "pvc" in p_lower:
+                style_type = 1
+                clean_prompt = prompt.replace("1", "", 1).replace("pvc", "", 1).strip()
+            elif p_lower.startswith("2") or "gk" in p_lower:
+                style_type = 2
+                clean_prompt = prompt.replace("2", "", 1).replace("gk", "", 1).strip()
+
+        full_prompt = get_figure_prompt(clean_prompt, style_type)
+
+        async for result in self._handle_quick_mode(
+            event,
+            full_prompt,
+            "2K",
+            "3:2",
+            "手办化",
+            None,
+            skip_figure_enhance=True,
+        ):
+            yield result
 
     @quick_mode_group.command("表情包")
     async def quick_sticker(self, event: AstrMessageEvent, prompt: str = ""):
@@ -1764,18 +1860,14 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                     try:
                         from astrbot.api.message_components import File
 
-                        file_comp = File(
-                            file=zip_path, name=os.path.basename(zip_path)
-                        )
+                        file_comp = File(file=zip_path, name=os.path.basename(zip_path))
                         yield event.chain_result([file_comp])
                         sent_success = True
 
                         yield event.image_result(primary_image_path)
                     except Exception as e:
                         logger.warning(f"发送ZIP失败: {e}")
-                        yield event.plain_result(
-                            "⚠️ 压缩包发送失败，降级使用合并转发"
-                        )
+                        yield event.plain_result("⚠️ 压缩包发送失败，降级使用合并转发")
                         sent_success = False
                 else:
                     yield event.plain_result(
@@ -1851,7 +1943,7 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                     if ";base64," in src:
                         _, _, b64_data = src.partition(";base64,")
                     data = base64.b64decode(b64_data)
-                    tmp_path = Path("/tmp") / f"cut_{int(time.time()*1000)}.png"
+                    tmp_path = Path("/tmp") / f"cut_{int(time.time() * 1000)}.png"
                     tmp_path.write_bytes(data)
                     local_path = str(tmp_path)
                 # 3) URL 下载（含 qpic/nt.qq 直链）
@@ -1859,7 +1951,7 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                     data_url = await self._download_qq_image(src)
                     if not data_url and self.api_client:
                         mime_type, b64 = await self.api_client._normalize_image_input(
-                            src
+                            src, image_input_mode=self.image_input_mode
                         )
                         if b64:
                             data_url = (
@@ -1873,13 +1965,13 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
                         if ";base64," in data_url:
                             _, _, b64_data = data_url.partition(";base64,")
                         data = base64.b64decode(b64_data)
-                        tmp_path = Path("/tmp") / f"cut_{int(time.time()*1000)}.png"
+                        tmp_path = Path("/tmp") / f"cut_{int(time.time() * 1000)}.png"
                         tmp_path.write_bytes(data)
                         local_path = str(tmp_path)
                 # 4) 其他字符串尝试当作 base64
                 elif isinstance(src, str):
                     data = base64.b64decode(src)
-                    tmp_path = Path("/tmp") / f"cut_{int(time.time()*1000)}.png"
+                    tmp_path = Path("/tmp") / f"cut_{int(time.time() * 1000)}.png"
                     tmp_path.write_bytes(data)
                     local_path = str(tmp_path)
             except Exception as e:
@@ -1897,7 +1989,9 @@ The last {final_avatar_count} image(s) provided are User Avatars (marked as opti
 
         split_files: list[str] = []
         try:
-            split_files = await asyncio.to_thread(split_image, local_path, rows=6, cols=4)
+            split_files = await asyncio.to_thread(
+                split_image, local_path, rows=6, cols=4
+            )
         except Exception as e:
             logger.error(f"切割图片时发生异常: {e}")
             split_files = []
