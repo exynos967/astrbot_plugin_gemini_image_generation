@@ -925,6 +925,20 @@ class GeminiAPIClient:
 
         logger.debug(f"🖼️ 共找到 {len(image_paths)} 张图片")
 
+        # 文本中尝试解析可能的图像URL或Base64（用于只返回文本的情况）
+        if text_chunks:
+            extracted_urls: list[str] = []
+            extracted_paths: list[str] = []
+            for chunk in text_chunks:
+                extracted_urls.extend(self._find_image_urls_in_text(chunk))
+                urls2, paths2 = await self._extract_from_content(chunk)
+                extracted_urls.extend(urls2)
+                extracted_paths.extend(paths2)
+
+            if extracted_urls or extracted_paths:
+                image_urls.extend(extracted_urls)
+                image_paths.extend(extracted_paths)
+
         text_content = (
             " ".join(chunk for chunk in text_chunks if chunk).strip()
             if text_chunks
@@ -933,7 +947,7 @@ class GeminiAPIClient:
         if text_content:
             logger.debug(f"🎯 找到文本内容: {text_content[:100]}...")
 
-        if image_paths:
+        if image_paths or image_urls:
             parse_end = asyncio.get_event_loop().time()
             logger.debug(f"🎉 API响应解析完成，总耗时: {parse_end - parse_start:.2f}秒")
             return image_urls, image_paths, text_content, thought_signature
@@ -1121,7 +1135,7 @@ class GeminiAPIClient:
         self, content: str
     ) -> tuple[list[str], list[str]]:
         """从文本内容中提取所有 data URI 图像，保持顺序"""
-        pattern = r"data:image/([^;]+);base64,([A-Za-z0-9+/=\s]+)"
+        pattern = r"data\s*:\s*image/([^;]+);\s*base64,\s*([A-Za-z0-9+/=\s]+)"
         matches = re.findall(pattern, content)
 
         image_urls: list[str] = []
@@ -1145,15 +1159,26 @@ class GeminiAPIClient:
         # Markdown 图片语法与裸露的图片链接
         markdown_pattern = r"!\[[^\]]*\]\((https?://[^)]+)\)"
         raw_pattern = r"(https?://[^\s)]+\.(?:png|jpe?g|gif|webp|bmp|tiff|avif))(?:\b|$)"
+        spaced_pattern = r"(https?\s*:\s*/\s*/[^\s)]+)"
 
         urls: list[str] = []
         seen: set[str] = set()
+
+        def _push(candidate: str):
+            cleaned = candidate.strip().replace("&amp;", "&").rstrip(").,;")
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                urls.append(cleaned)
+
         for pattern in (markdown_pattern, raw_pattern):
             for match in re.findall(pattern, text, flags=re.IGNORECASE):
-                cleaned = match.strip().replace("&amp;", "&")
-                if cleaned not in seen:
-                    seen.add(cleaned)
-                    urls.append(cleaned)
+                _push(match)
+
+        # 适配带空格的 http:// 片段（如 "http: //1. 2. 3. 4/image.png"）
+        for match in re.findall(spaced_pattern, text, flags=re.IGNORECASE):
+            compact = re.sub(r"\s+", "", match)
+            if compact.lower().startswith(("http://", "https://")):
+                _push(compact)
 
         return urls
 

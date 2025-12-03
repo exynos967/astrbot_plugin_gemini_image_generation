@@ -437,7 +437,7 @@ def split_image(
         rows: 保留参数以兼容旧接口（新方法中不再使用）
         cols: 保留参数以兼容旧接口（新方法中不再使用）
         output_dir: 输出目录，如果不指定则使用插件数据目录下的 split_output
-        bboxes: 保留参数以兼容旧接口（新方法中不再使用）
+        bboxes: 外部提供的裁剪框（x,y,width,height），优先使用
 
     Returns:
         List[str]: 切分后的图片文件路径列表，按顺序排列
@@ -462,9 +462,34 @@ def split_image(
             logger.error(f"无法读取图像: {image_path}")
             return []
 
-        # 使用 SmartMemeSplitter 进行智能切分
-        splitter = SmartMemeSplitter(min_gap=5, edge_threshold=10)
-        boxes = splitter.detect_grid(img, debug=True)
+        # 若传入外部裁剪框则优先使用，避免重复跑智能切分
+        boxes = []
+        if bboxes:
+            h, w = img.shape[:2]
+            for box in bboxes:
+                try:
+                    x = int(box.get("x", 0)) if isinstance(box, dict) else int(box[0])
+                    y = int(box.get("y", 0)) if isinstance(box, dict) else int(box[1])
+                    bw = int(box.get("width", 0)) if isinstance(box, dict) else int(box[2])
+                    bh = int(box.get("height", 0)) if isinstance(box, dict) else int(box[3])
+                except Exception as e:
+                    logger.debug(f"外部裁剪框解析失败，跳过: {e}")
+                    continue
+
+                x = max(0, x)
+                y = max(0, y)
+                bw = min(bw, w - x)
+                bh = min(bh, h - y)
+                if bw > 0 and bh > 0:
+                    boxes.append((x, y, bw, bh))
+
+            if boxes:
+                logger.debug(f"使用外部提供的裁剪框，共 {len(boxes)} 个")
+
+        # 如果没有外部裁剪框则使用 SmartMemeSplitter 进行智能切分
+        if not boxes:
+            splitter = SmartMemeSplitter(min_gap=5, edge_threshold=10)
+            boxes = splitter.detect_grid(img, debug=True)
 
         if not boxes:
             logger.warning("智能切分未检测到网格")
