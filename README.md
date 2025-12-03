@@ -404,17 +404,18 @@
 - [NapCat](https://napneko.github.io/) - OneBot v11 实现
 
 **特别感谢**:
-- [@MliKiowa](https://github.com/MliKiowa) - 图像切割算法提供者，为插件的智能表情包切分功能提供了重要的算法支持
-- [@exynos967](https://github.com/exynos967) - 多个重要功能和修复
- - **[PR#1](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/1)**: 限制/限流设置和手办化功能
- - **[PR#2](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/2)**: 兼容 OpenAI/Gemini混合url响应格式
- - **[PR#3](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/3)**: 兼容 OpenAI传入参数
- - **[PR#4](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/4)**: 手办化命令使用专用提示词
-- [@zouyonghe](https://github.com/zouyonghe) - 新增代理支持，可选固定尺寸
- - **[PR#5](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/5)**: 为 Gemini API 添加代理支持
- - **[PR#6](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/6)**: 增加保留参考图尺寸开关，改图/换风格可沿用参考图分辨率
-- [@vmoranv](https://github.com/vmoranv) - 优化表情包提示词
- - **[PR#11](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/11)**: 优化表情包提示词
+
+- [MliKiowa](https://github.com/MliKiowa)：图像切割算法提供者，为插件的智能表情包切分功能提供重要算法支持
+- [@exynos967](https://github.com/exynos967)：多个重要功能和修复
+  - [PR#1](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/1)：限制/限流设置和手办化功能
+  - [PR#2](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/2)：兼容 OpenAI/Gemini 混合 URL 响应格式
+  - [PR#3](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/3)：兼容 OpenAI 传入参数
+  - [PR#4](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/4)：手办化命令使用专用提示词
+- [@zouyonghe](https://github.com/zouyonghe)：新增代理支持、可选固定尺寸
+  - [PR#5](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/5)：为 Gemini API 添加代理支持
+  - [PR#6](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/6)：增加保留参考图尺寸开关，改图/换风格可沿用参考图分辨率
+- [@vmoranv](https://github.com/vmoranv)：优化表情包提示词
+  - [PR#11](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pull/11)：优化表情包提示词
 ## 🤝 关联支持
 
 - **项目地址**: [GitHub Repository](https://github.com/piexian/astrbot_plugin_gemini_image_generation)
