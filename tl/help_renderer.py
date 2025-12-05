@@ -77,60 +77,8 @@ def render_text(template_data: dict) -> str:
 • 智能重试: {template_data.get("smart_retry_status", "✗ 禁用")}"""
 
 
-def render_local_pillow(
-    templates_dir: str | Path,
-    theme_settings: dict,
-    template_data: dict,
-) -> bytes:
-    """使用 Pillow 本地渲染 Markdown 模板为图片"""
-    template_path = get_template_path(templates_dir, theme_settings, ".md")
-
-    if not template_path.exists():
-        # 回退到默认 md 模板
-        template_path = Path(templates_dir) / "help_template.md"
-
-    if template_path.exists():
-        with open(template_path, encoding="utf-8") as f:
-            md_content = f.read()
-        # 简单模板变量替换
-        for key, value in template_data.items():
-            md_content = md_content.replace("{{ " + key + " }}", str(value))
-            md_content = md_content.replace("{{" + key + "}}", str(value))
-    else:
-        md_content = render_text(template_data)
-
-    # 判断深色/浅色主题
-    is_dark = "dark" in str(template_path).lower()
-    bg_color = (30, 30, 30) if is_dark else (255, 255, 255)
-    text_color = (220, 220, 220) if is_dark else (30, 30, 30)
-    heading_color = (100, 180, 255) if is_dark else (0, 100, 200)
-
-    # 渲染参数
-    width = 600
-    padding = 30
-    line_height = 28
-    heading_height = 36
-
-    # 计算行数
-    lines = md_content.strip().split("\n")
-    total_height = padding * 2
-
-    for line in lines:
-        if line.startswith("#"):
-            total_height += heading_height
-        else:
-            total_height += line_height
-
-    total_height = max(total_height, 400)
-
-    # 创建图片
-    img = Image.new("RGB", (width, total_height), bg_color)
-    draw = ImageDraw.Draw(img)
-
-    # 尝试加载字体
-    font_size = 16
-    heading_font_size = 20
-    # 内置字体路径
+def _load_font(size: int):
+    """加载字体"""
     builtin_font = Path(__file__).parent / "NotoSansSC-Regular.ttf"
     font_paths = [
         str(builtin_font),
@@ -139,51 +87,149 @@ def render_local_pillow(
         "/System/Library/Fonts/PingFang.ttc",
         "C:/Windows/Fonts/msyh.ttc",
     ]
-    font = None
-    heading_font = None
     for fp in font_paths:
         if os.path.exists(fp):
             try:
-                font = ImageFont.truetype(fp, font_size)
-                heading_font = ImageFont.truetype(fp, heading_font_size)
-                break
+                return ImageFont.truetype(fp, size)
             except Exception:
                 continue
-    if font is None:
-        font = ImageFont.load_default()
-        heading_font = font
+    return ImageFont.load_default()
 
-    y = padding
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("##"):
-            # 二级标题
-            text = stripped.lstrip("#").strip()
-            draw.text((padding, y), text, font=heading_font, fill=heading_color)
-            y += heading_height
-        elif stripped.startswith("#"):
-            # 一级标题
-            text = stripped.lstrip("#").strip()
-            draw.text((padding, y), text, font=heading_font, fill=heading_color)
-            y += heading_height
-        elif stripped.startswith("-") or stripped.startswith("•"):
-            # 列表项
-            text = "• " + stripped.lstrip("-•").strip()
-            draw.text((padding + 10, y), text, font=font, fill=text_color)
+
+def render_local_pillow(
+    templates_dir: str | Path,
+    theme_settings: dict,
+    template_data: dict,
+) -> bytes:
+    """使用 Pillow 本地渲染帮助页为图片（类似HTML样式）"""
+    # 判断深色/浅色主题
+    mode = theme_settings.get("mode", "cycle")
+    is_dark = False
+    if mode == "single":
+        is_dark = "dark" in theme_settings.get("single_config", {}).get(
+            "template_name", ""
+        )
+    else:
+        cycle_config = theme_settings.get("cycle_config", {})
+        day_start = cycle_config.get("day_start", 6)
+        day_end = cycle_config.get("day_end", 18)
+        current_hour = datetime.now().hour
+        is_dark = not (day_start <= current_hour < day_end)
+
+    # 颜色配置
+    if is_dark:
+        bg_color = (22, 27, 34)
+        card_bg = (33, 38, 45)
+        border_color = (48, 54, 61)
+        text_primary = (230, 237, 243)
+        text_secondary = (125, 133, 144)
+        accent_color = (88, 166, 255)
+    else:
+        bg_color = (246, 248, 250)
+        card_bg = (255, 255, 255)
+        border_color = (208, 215, 222)
+        text_primary = (31, 35, 40)
+        text_secondary = (101, 109, 118)
+        accent_color = (9, 105, 218)
+
+    # 字体
+    title_font = _load_font(24)
+    section_font = _load_font(16)
+    text_font = _load_font(14)
+
+    # 布局参数
+    width = 520
+    padding = 24
+    section_gap = 20
+    line_height = 24
+    section_title_height = 32
+
+    # 准备内容
+    title = template_data.get("title", "Gemini 图像生成插件")
+    config_items = [
+        f"模型: {template_data.get('model', 'N/A')}",
+        f"分辨率: {template_data.get('resolution', 'N/A')}",
+        f"API密钥: {template_data.get('api_keys_count', 0)}个",
+        f"搜索接地: {template_data.get('grounding_status', '-')}",
+        f"自动头像: {template_data.get('avatar_status', '-')}",
+        f"智能重试: {template_data.get('smart_retry_status', '-')}",
+        f"LLM超时: {template_data.get('tool_timeout', 60)}秒",
+    ]
+    commands = [
+        "/生图 [描述] - 生成图像",
+        "/改图 [描述] - 修改图像",
+        "/换风格 [风格] - 风格转换",
+        "/切图 - 切割表情包",
+        "/生图帮助 - 显示帮助",
+    ]
+    quick_modes = [
+        "/快速 头像 - 1K 1:1",
+        "/快速 海报 - 2K 16:9",
+        "/快速 壁纸 - 4K 16:9",
+        "/快速 手办化 - 2K 3:2",
+    ]
+
+    # 计算高度
+    total_height = padding * 2 + 50  # 标题区
+    total_height += section_title_height + len(config_items) * line_height + section_gap
+    total_height += section_title_height + len(commands) * line_height + section_gap
+    total_height += section_title_height + len(quick_modes) * line_height + padding
+
+    # 创建图片
+    img = Image.new("RGB", (width, total_height), bg_color)
+    draw = ImageDraw.Draw(img)
+
+    # 绘制卡片背景（圆角矩形）
+    card_margin = 12
+    draw.rounded_rectangle(
+        [card_margin, card_margin, width - card_margin, total_height - card_margin],
+        radius=12,
+        fill=card_bg,
+        outline=border_color,
+    )
+
+    y = padding + card_margin
+
+    # 标题
+    draw.text((padding + card_margin, y), title, font=title_font, fill=text_primary)
+    y += 40
+
+    # 分隔线
+    draw.line(
+        [(padding + card_margin, y), (width - padding - card_margin, y)],
+        fill=border_color,
+        width=1,
+    )
+    y += section_gap
+
+    def draw_section(section_title: str, items: list[str]):
+        nonlocal y
+        # 标题栏
+        draw.rectangle(
+            [padding + card_margin, y, padding + card_margin + 4, y + 16],
+            fill=accent_color,
+        )
+        draw.text(
+            (padding + card_margin + 12, y - 2),
+            section_title,
+            font=section_font,
+            fill=text_primary,
+        )
+        y += section_title_height
+        # 内容
+        for item in items:
+            draw.text(
+                (padding + card_margin + 12, y),
+                item,
+                font=text_font,
+                fill=text_secondary,
+            )
             y += line_height
-        elif stripped.startswith(">"):
-            # 引用
-            text = stripped.lstrip(">").strip()
-            draw.text((padding + 20, y), text, font=font, fill=(200, 150, 50))
-            y += line_height
-        elif stripped.startswith("{%") or stripped.startswith("{{"):
-            # 跳过 Jinja2 控制语句
-            continue
-        elif stripped:
-            draw.text((padding, y), stripped, font=font, fill=text_color)
-            y += line_height
-        else:
-            y += line_height // 2
+        y += section_gap // 2
+
+    draw_section("当前配置", config_items)
+    draw_section("基础指令", commands)
+    draw_section("快速模式", quick_modes)
 
     # 输出为 PNG bytes
     buffer = io.BytesIO()
