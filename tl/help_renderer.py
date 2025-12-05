@@ -130,26 +130,26 @@ def render_local_pillow(
     # 尝试加载字体
     font_size = 16
     heading_font_size = 20
-    try:
-        # 尝试常见中文字体路径
-        font_paths = [
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/System/Library/Fonts/PingFang.ttc",
-            "C:/Windows/Fonts/msyh.ttc",
-        ]
-        font = None
-        heading_font = None
-        for fp in font_paths:
-            if os.path.exists(fp):
+    # 内置字体路径
+    builtin_font = Path(__file__).parent / "NotoSansSC-Regular.ttf"
+    font_paths = [
+        str(builtin_font),
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+    ]
+    font = None
+    heading_font = None
+    for fp in font_paths:
+        if os.path.exists(fp):
+            try:
                 font = ImageFont.truetype(fp, font_size)
                 heading_font = ImageFont.truetype(fp, heading_font_size)
                 break
-        if font is None:
-            font = ImageFont.load_default()
-            heading_font = font
-    except Exception:
+            except Exception:
+                continue
+    if font is None:
         font = ImageFont.load_default()
         heading_font = font
 
